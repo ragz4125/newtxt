@@ -16,11 +16,13 @@ export const getSensorsTypeList = async (req: Request, res: Response): Promise<v
         const startDate = dayjs(requestedDate).startOf('month').format('YYYY-MM-DD 00:00:00');
         const endDate = dayjs(requestedDate).endOf('month').format('YYYY-MM-DD 23:59:59');
 
+        // Fetch integrations with their product catalogs
         const [integrationRows]: [any[], any] = await db.query(`
-            SELECT product_catalog FROM integrations WHERE id IN (3, 4)
+            SELECT id, product_catalog FROM integrations WHERE id IN (3, 4)
         `);
 
-        const typeToProductMapping: { [deviceType: string]: string } = {};
+        // Build a map of integration id to product catalog
+        const integrationCatalogs: { [id: number]: any } = {};
 
         integrationRows.forEach(row => {
             if (row.product_catalog) {
@@ -34,11 +36,7 @@ export const getSensorsTypeList = async (req: Request, res: Response): Promise<v
                     }
 
                     if (catalog && typeof catalog === 'object') {
-                        Object.entries(catalog).forEach(([deviceType, productName]) => {
-                            if (!typeToProductMapping[deviceType]) {
-                                typeToProductMapping[deviceType] = productName as string;
-                            }
-                        });
+                        integrationCatalogs[row.id] = catalog;
                     }
                 } catch (error) {
                     console.error('Error processing product catalog:', error);
@@ -46,13 +44,15 @@ export const getSensorsTypeList = async (req: Request, res: Response): Promise<v
             }
         });
 
-        console.log('Type to product mapping:', typeToProductMapping);
+        console.log('Integration catalogs:', integrationCatalogs);
 
+        // Fetch device history with manufacturerId, ordered by latest changeAt
         const [deviceRows]: [any[], any] = await db.query(`
             WITH DeviceTimeline AS (
                 SELECT
                     deviceId,
                     sensorName,
+                    manufacturerId,
                     deviceState,
                     changeAt,
                     LEAD(deviceState) OVER (PARTITION BY deviceId ORDER BY changeAt) as nextState,
@@ -62,7 +62,7 @@ export const getSensorsTypeList = async (req: Request, res: Response): Promise<v
                 AND (manufacturerId = 3 OR manufacturerId = 4)
                 AND changeAt <= ?
             )
-            SELECT deviceId, sensorName, changeAt
+            SELECT deviceId, sensorName, manufacturerId, changeAt
             FROM DeviceTimeline
             WHERE deviceState = 'ACTIVATED'
             AND (
@@ -78,32 +78,19 @@ export const getSensorsTypeList = async (req: Request, res: Response): Promise<v
             ORDER BY changeAt DESC
         `, [clientId, endDate, endDate, startDate, endDate, startDate, startDate]);
 
-        const genericToTypeMapping: { [genericName: string]: string } = {
-            'thermo': 'Thermo',
-            'bp': 'BP',
-            'mat': 'Mat',
-            'weight': 'Weight',
-            'scale': 'Weight',
-            'oximeter': 'SPO2',
-            'spo2': 'SPO2',
-            'pulse': 'SPO2'
-        };
-
-        const finalOutput: { [deviceType: string]: string } = {};
+        const finalOutput: { [sensorName: string]: string } = {};
 
         // Process devices in order of latest changeAt (descending)
-        // Once a deviceType has a product name, it won't be updated
+        // Match manufacturerId with integration id and look up sensorName in product_catalog
+        // Once a sensorName has a product, it won't be updated
         deviceRows.forEach(row => {
-            if (row.sensorName) {
-                const lowerSensorName = row.sensorName.toLowerCase();
-                const deviceType = genericToTypeMapping[lowerSensorName];
+            if (row.sensorName && row.manufacturerId) {
+                const catalog = integrationCatalogs[row.manufacturerId];
 
-                if (deviceType) {
-                    const productName = typeToProductMapping[deviceType];
-
-                    // Only assign if deviceType doesn't already have a product name
-                    if (productName && !finalOutput[deviceType]) {
-                        finalOutput[deviceType] = productName;
+                if (catalog && catalog[row.sensorName]) {
+                    // Only assign if sensorName doesn't already have a product name
+                    if (!finalOutput[row.sensorName]) {
+                        finalOutput[row.sensorName] = catalog[row.sensorName];
                     }
                 }
             }
